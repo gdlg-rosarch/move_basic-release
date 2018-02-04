@@ -39,8 +39,7 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
 #include <nav_msgs/Path.h>
-#include <sensor_msgs/LaserScan.h>
-#include <visualization_msgs/Marker.h>
+#include <std_msgs/Float32.h>
 
 #include <actionlib/server/simple_action_server.h>
 #include <move_base_msgs/MoveBaseAction.h>
@@ -54,12 +53,11 @@ typedef actionlib::SimpleActionServer<move_base_msgs::MoveBaseAction> MoveBaseAc
 class MoveBasic {
   private:
     ros::Subscriber goalSub;
-    ros::Subscriber scanSub;
 
     ros::Publisher goalPub;
     ros::Publisher cmdPub;
     ros::Publisher pathPub;
-    ros::Publisher linePub;
+    ros::Publisher obstacle_dist_pub;
 
     std::unique_ptr<MoveBaseActionServer> actionServer;
     std::unique_ptr<ObstacleDetector> obstacle_detector;
@@ -84,13 +82,11 @@ class MoveBasic {
     double frontToLidar;
     double obstacleWaitLimit;
 
-    double obstacleDist;
+    float forward_obstacle_dist;
     std::string mapFrame;
 
     double reverseWithoutTurningThreshold;
-    bool have_lidar;
 
-    void scanCallback(const sensor_msgs::LaserScan::ConstPtr &msg);
     void goalCallback(const geometry_msgs::PoseStamped::ConstPtr &msg);
     void executeAction(const move_base_msgs::MoveBaseGoalConstPtr& goal);
     void drawLine(double x0, double y0, double x1, double y1);
@@ -155,7 +151,7 @@ static void getPose(const tf2::Transform& tf, double& x, double& y, double& yaw)
 // Constructor
 
 MoveBasic::MoveBasic(): tfBuffer(ros::Duration(30.0)),
-                        listener(tfBuffer), obstacleDist(10.0)
+                        listener(tfBuffer)
 {
     ros::NodeHandle nh("~");
 
@@ -173,9 +169,6 @@ MoveBasic::MoveBasic(): tfBuffer(ros::Duration(30.0)),
     nh.param<double>("localization_latency", localizationLatency, 0.5);
     nh.param<int>("rotation_attempts", rotationAttempts, 1);
 
-    nh.param<double>("robot_width", robotWidth, 0.35);
-    // distance from lidar center to front-most part of robot
-    nh.param<double>("front_to_lidar", frontToLidar, 0.11);
     // how long to wait for an obstacle to disappear
     nh.param<double>("obstacle_wait_limit", obstacleWaitLimit, 10.0);
 
@@ -187,9 +180,9 @@ MoveBasic::MoveBasic(): tfBuffer(ros::Duration(30.0)),
 
     cmdPub = ros::Publisher(nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1));
     pathPub = ros::Publisher(nh.advertise<nav_msgs::Path>("/plan", 1));
-    linePub = ros::Publisher(nh.advertise<visualization_msgs::Marker>("/obstacle", 1));
 
-    scanSub = nh.subscribe("/scan", 1, &MoveBasic::scanCallback, this);
+    obstacle_dist_pub =
+        ros::Publisher(nh.advertise<std_msgs::Float32>("/obstacle_distance", 1));
 
     goalSub = nh.subscribe("/move_base_simple/goal", 1,
                             &MoveBasic::goalCallback, this);
@@ -202,7 +195,6 @@ MoveBasic::MoveBasic(): tfBuffer(ros::Duration(30.0)),
     goalPub = actionNh.advertise<move_base_msgs::MoveBaseActionGoal>(
       "/move_base/goal", 1);
 
-    have_lidar = false;
     obstacle_detector.reset(new ObstacleDetector(nh, &tfBuffer));
 
     ROS_INFO("Move Basic ready");
@@ -238,53 +230,6 @@ bool MoveBasic::transformPose(const std::string& from, const std::string& to,
     }
     out = tf * in;
     return true;
-}
-
-
-// Called when a laser scan is received assumes laser scanner is
-// mounted at around base_link. Sets obstacleDist
-// XXX this will get incorporated into the ObstacleDetector class soon
-
-void MoveBasic::scanCallback(const sensor_msgs::LaserScan::ConstPtr &msg)
-{
-    float angle = msg->angle_min;
-    float increment = msg->angle_increment;
-    float width_2 = robotWidth / 2.0;
-    float rangeMin = msg->range_min;
-    float minDist = msg->range_max;
-    have_lidar = true;
-
-    for (int i=0; i<msg->ranges.size(); i++) {
-        angle += increment;
-
-        float r = msg->ranges[i];
-
-        // ignore bogus samples
-        if (std::isnan(r) || r < rangeMin) {
-            continue;
-        }
-
-        float y = r * sin(angle);
-
-        // ignore anything outside width of robot
-        if (std::abs(y) > width_2) {
-            continue;
-        }
-
-        float x = r * cos(angle);
-
-        // ignore anything behind center of lidar
-        if (x < 0) {
-            continue;
-        }
-
-        if (x < minDist) {
-            minDist = x;
-        }
-    }
-    obstacleDist = minDist - frontToLidar;
-
-    drawLine(minDist, -width_2, minDist, width_2);
 }
 
 
@@ -461,44 +406,19 @@ void MoveBasic::sendCmd(double angular, double linear)
 }
 
 
-// publish visualization
-
-void MoveBasic::drawLine(double x0, double y0, double x1, double y1)
-{
-    visualization_msgs::Marker line;
-    line.type = visualization_msgs::Marker::LINE_LIST;
-    line.action = visualization_msgs::Marker::ADD;
-    line.header.frame_id = "/base_link";
-    line.color.r = 1.0f;
-    line.color.g = 0.0f;
-    line.color.b = 0.0f;
-    line.color.a = 1.0f;
-    line.id = 0x42;
-    line.ns = "distance";
-    line.scale.x = line.scale.y = line.scale.z = 0.01;
-    line.pose.position.x = 0;
-    line.pose.position.y = 0;
-    geometry_msgs::Point gp0, gp1;
-    gp0.x = x0;
-    gp0.y = y0;
-    gp0.z = 0;
-    gp1.x = x1;
-    gp1.y = y1;
-    gp1.z = 0;
-    line.points.push_back(gp0);
-    line.points.push_back(gp1);
-
-    linePub.publish(line);
-}
-
-
 // Main loop
 
 void MoveBasic::run()
 {
     ros::Rate r(20);
+    std_msgs::Float32 msg;
+
     while (ros::ok()) {
         ros::spinOnce();
+        forward_obstacle_dist = obstacle_detector->obstacle_dist(true);
+        msg.data = forward_obstacle_dist;
+        obstacle_dist_pub.publish(msg);
+
         r.sleep();
     }
 }
@@ -612,8 +532,10 @@ bool MoveBasic::moveLinear(double requestedDistance)
 
         double distRemaining = std::abs(requestedDistance) - std::abs(distTravelled);
 
-        if (!have_lidar) {
-            obstacleDist = obstacle_detector->obstacle_dist(requestedDistance > 0);
+        // No need to calculate forward obstacle speed, since we already have it
+        double obstacleDist = forward_obstacle_dist;
+        if (requestedDistance < 0.0) {
+            obstacleDist = obstacle_detector->obstacle_dist(false);
         }
 
         double velocity = std::max(minLinearVelocity,
