@@ -2,6 +2,12 @@
 Changelog for package move_basic
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+0.3.2 (2018-03-03)
+------------------
+* Don't rotate to go small distances
+* Reduce verbosity when rotating
+* Contributors: Jim Vaughan
+
 0.3.1 (2018-02-04)
 ------------------
 * Publish forward obstacle distance (`#31 <https://github.com/UbiquityRobotics/move_basic/issues/31>`_)
